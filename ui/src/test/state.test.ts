@@ -76,12 +76,101 @@ describe('SyncedState', () => {
 		state.obj.count = 5;
 		state.obj.label = 'local';
 
-		await expect(state.sync()).resolves.toBe(true);
-		expect(socket.sentMessages().at(-1)).toMatchObject({
+		const pending = state.sync();
+		await flushMicrotasks();
+		const sent = socket.sentMessages().at(-1);
+		expect(sent).toMatchObject({
 			type: 'set',
 			name: 'TestState',
+			version: 2,
 			value: { count: 5, label: 'local' }
 		});
+		socket.receive({
+			type: 'update',
+			id: sent?.id,
+			name: 'TestState',
+			version: 2,
+			value: { count: 5, label: 'local' }
+		});
+
+		await expect(pending).resolves.toEqual({ ok: true, version: 2 });
+		expect(state.lastSyncError).toBeUndefined();
+	});
+
+	it('returns a sync conflict while applying the latest snapshot', async () => {
+		const { state, socket } = createState();
+		socket.open();
+		await flushMicrotasks();
+
+		socket.receive({ type: 'snapshot', name: 'TestState', version: 1, value: { count: 1, label: 'one' } });
+		await state.initialized;
+
+		state.obj.count = 5;
+		state.obj.label = 'local';
+
+		const pending = state.sync();
+		await flushMicrotasks();
+		const sent = socket.sentMessages().at(-1);
+		expect(sent).toMatchObject({
+			type: 'set',
+			name: 'TestState',
+			version: 2,
+			value: { count: 5, label: 'local' }
+		});
+
+		socket.receive({
+			type: 'snapshot',
+			id: sent?.id,
+			name: 'TestState',
+			version: 2,
+			value: { count: 2, label: 'server' },
+			error: 'syncedstate: state version conflict'
+		});
+
+		await expect(pending).resolves.toEqual({
+			ok: false,
+			version: 2,
+			error: 'syncedstate: state version conflict'
+		});
+		expect(state.obj).toEqual({ count: 2, label: 'server' });
+		expect(state.version).toBe(2);
+		expect(state.lastSyncError).toBe('syncedstate: state version conflict');
+	});
+
+	it('does not sync before a version is known', async () => {
+		const { state, socket } = createState();
+		socket.open();
+		await flushMicrotasks();
+
+		await expect(state.sync()).resolves.toEqual({
+			ok: false,
+			error: 'syncedstate: state version is unknown'
+		});
+		expect(state.lastSyncError).toBe('syncedstate: state version is unknown');
+	});
+
+	it('returns a matching server error from sync', async () => {
+		const { state, socket } = createState();
+		socket.open();
+		await flushMicrotasks();
+
+		socket.receive({ type: 'snapshot', name: 'TestState', version: 1, value: { count: 1, label: 'one' } });
+		await state.initialized;
+
+		const pending = state.sync();
+		await flushMicrotasks();
+		const sent = socket.sentMessages().at(-1);
+
+		socket.receive({
+			type: 'error',
+			id: sent?.id,
+			name: 'TestState',
+			error: 'bad request'
+		});
+
+		await expect(pending).resolves.toEqual({ ok: false, error: 'bad request' });
+		expect(state.obj).toEqual({ count: 1, label: 'one' });
+		expect(state.lastSyncError).toBe('bad request');
 	});
 
 	it('closes the underlying subscription idempotently', async () => {
@@ -140,21 +229,72 @@ describe('SyncedCollection', () => {
 	});
 
 	it('syncs an existing entry to its exact indexed address', async () => {
-		const { collection, socket } = createCollection({
-			123: { count: 1, label: 'one' }
-		});
+		const { collection, socket } = createCollection();
 		socket.open();
 		await collection.initialized;
 
+		socket.receive({ type: 'snapshot', name: 'customer:123', version: 1, value: { count: 1, label: 'one' } });
 		collection.entries[123].count = 5;
 
-		await expect(collection.sync('123')).resolves.toBe(true);
-		expect(socket.sentMessages().at(-1)).toMatchObject({
+		const pending = collection.sync('123');
+		await flushMicrotasks();
+		const sent = socket.sentMessages().at(-1);
+		expect(sent).toMatchObject({
 			type: 'set',
 			name: 'customer:123',
+			version: 2,
 			value: { count: 5, label: 'one' }
 		});
-		await expect(collection.sync('missing')).resolves.toBe(false);
+		socket.receive({
+			type: 'update',
+			id: sent?.id,
+			name: 'customer:123',
+			version: 2,
+			value: { count: 5, label: 'one' }
+		});
+		await expect(pending).resolves.toEqual({ ok: true, version: 2 });
+		expect(collection.syncErrors[123]).toBeUndefined();
+		await expect(collection.sync('missing')).resolves.toEqual({
+			ok: false,
+			error: 'syncedstate: state entry is missing'
+		});
+	});
+
+	it('returns an indexed sync conflict while applying the latest snapshot', async () => {
+		const { collection, socket } = createCollection();
+		socket.open();
+		await collection.initialized;
+
+		socket.receive({ type: 'snapshot', name: 'customer:123', version: 1, value: { count: 1, label: 'one' } });
+		collection.entries[123].count = 5;
+
+		const pending = collection.sync('123');
+		await flushMicrotasks();
+		const sent = socket.sentMessages().at(-1);
+		expect(sent).toMatchObject({
+			type: 'set',
+			name: 'customer:123',
+			version: 2,
+			value: { count: 5, label: 'one' }
+		});
+
+		socket.receive({
+			type: 'snapshot',
+			id: sent?.id,
+			name: 'customer:123',
+			version: 2,
+			value: { count: 2, label: 'server' },
+			error: 'syncedstate: state version conflict'
+		});
+
+		await expect(pending).resolves.toEqual({
+			ok: false,
+			version: 2,
+			error: 'syncedstate: state version conflict'
+		});
+		expect(collection.entries[123]).toEqual({ count: 2, label: 'server' });
+		expect(collection.versions[123]).toBe(2);
+		expect(collection.syncErrors[123]).toBe('syncedstate: state version conflict');
 	});
 
 	it('closes the wildcard subscription idempotently', async () => {

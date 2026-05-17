@@ -173,10 +173,11 @@ func TestHandlerSetFromClient(t *testing.T) {
 	_ = readMessage(t, conn)
 
 	writeMessage(t, conn, Message{
-		Type:  MessageSet,
-		ID:    "set",
-		Name:  "TestState",
-		Value: json.RawMessage(`{"name":"client","count":7}`),
+		Type:    MessageSet,
+		ID:      "set",
+		Name:    "TestState",
+		Version: 2,
+		Value:   json.RawMessage(`{"name":"client","count":7}`),
 	})
 	update := readMessage(t, conn)
 	if update.Type != MessageUpdate || update.ID != "set" || update.Version != 2 {
@@ -189,6 +190,90 @@ func TestHandlerSetFromClient(t *testing.T) {
 	}
 	if value.Name != "client" || value.Count != 7 || meta.Version != 2 {
 		t.Fatalf("value=%+v meta=%+v", value, meta)
+	}
+}
+
+func TestHandlerStaleSetReturnsLatestSnapshotWithError(t *testing.T) {
+	manager := NewManager()
+	key, err := Define(manager, "TestState", testState{Name: "initial", Count: 1})
+	if err != nil {
+		t.Fatalf("define: %v", err)
+	}
+
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	conn := dialClient(t, wsURL(server.URL))
+	writeMessage(t, conn, Message{Type: MessageSubscribe, ID: "sub", Name: "TestState"})
+	_ = readMessage(t, conn)
+
+	if err := key.Set(context.Background(), testState{Name: "server", Count: 2}); err != nil {
+		t.Fatalf("server set: %v", err)
+	}
+	_ = readMessage(t, conn)
+
+	writeMessage(t, conn, Message{
+		Type:    MessageSet,
+		ID:      "stale",
+		Name:    "TestState",
+		Version: 2,
+		Value:   json.RawMessage(`{"name":"client","count":7}`),
+	})
+
+	snapshot := readMessage(t, conn)
+	if snapshot.Type != MessageSnapshot || snapshot.ID != "stale" || snapshot.Version != 2 || snapshot.Error != ErrVersionConflict.Error() {
+		t.Fatalf("stale snapshot = %+v", snapshot)
+	}
+	value := decodeValue[testState](t, snapshot)
+	if value.Name != "server" || value.Count != 2 {
+		t.Fatalf("stale snapshot value = %+v", value)
+	}
+
+	stored, meta, err := key.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if stored.Name != "server" || stored.Count != 2 || meta.Version != 2 {
+		t.Fatalf("stored value=%+v meta=%+v", stored, meta)
+	}
+}
+
+func TestHandlerSetWithoutVersionReturnsLatestSnapshotWithError(t *testing.T) {
+	manager := NewManager()
+	key, err := Define(manager, "TestState", testState{Name: "initial", Count: 1})
+	if err != nil {
+		t.Fatalf("define: %v", err)
+	}
+
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	conn := dialClient(t, wsURL(server.URL))
+	writeMessage(t, conn, Message{Type: MessageSubscribe, ID: "sub", Name: "TestState"})
+	_ = readMessage(t, conn)
+
+	writeMessage(t, conn, Message{
+		Type:  MessageSet,
+		ID:    "missing-version",
+		Name:  "TestState",
+		Value: json.RawMessage(`{"name":"client","count":7}`),
+	})
+
+	snapshot := readMessage(t, conn)
+	if snapshot.Type != MessageSnapshot || snapshot.ID != "missing-version" || snapshot.Version != 1 || snapshot.Error != ErrVersionConflict.Error() {
+		t.Fatalf("missing-version snapshot = %+v", snapshot)
+	}
+	value := decodeValue[testState](t, snapshot)
+	if value.Name != "initial" || value.Count != 1 {
+		t.Fatalf("missing-version snapshot value = %+v", value)
+	}
+
+	stored, meta, err := key.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if stored.Name != "initial" || stored.Count != 1 || meta.Version != 1 {
+		t.Fatalf("stored value=%+v meta=%+v", stored, meta)
 	}
 }
 

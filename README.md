@@ -113,7 +113,11 @@ The WebSocket transport uses JSON envelopes:
 { "type": "update", "name": "InternalState", "version": 2, "value": { "authenticated": true, "name": "Jerod" } }
 ```
 
-Supported message types are `subscribe`, `unsubscribe`, `snapshot`, `set`, `update`, and `error`. Version numbers are assigned by the server. V1 syncs full JSON values, not partial patches.
+```json
+{ "type": "set", "id": "2", "name": "InternalState", "version": 3, "value": { "authenticated": false, "name": "" } }
+```
+
+Supported message types are `subscribe`, `unsubscribe`, `snapshot`, `set`, `update`, and `error`. Snapshots and updates carry the current server-assigned version. Frontend `set` messages carry the next expected version, and stale writes receive a `snapshot` with the latest value/version plus an `error` string. V1 syncs full JSON values, not partial patches.
 
 ## Development
 

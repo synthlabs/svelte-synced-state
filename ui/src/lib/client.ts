@@ -92,8 +92,8 @@ export class SyncedClient {
 		return this.send({ type: 'snapshot', id: this.#id(), name });
 	}
 
-	async set<T>(name: string, value: T): Promise<boolean> {
-		return this.send({ type: 'set', id: this.#id(), name, value });
+	async set<T>(name: string, value: T, version?: number): Promise<boolean> {
+		return this.send({ type: 'set', id: this.#id(), name, value, version });
 	}
 
 	async send(message: StateMessage): Promise<boolean> {

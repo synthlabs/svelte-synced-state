@@ -101,6 +101,66 @@ func TestUpdateSetAndLockedSync(t *testing.T) {
 	}
 }
 
+func TestCheckedWritesRejectVersionConflicts(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager()
+	key, err := Define(manager, "TestState", testState{Name: "initial", Count: 1})
+	if err != nil {
+		t.Fatalf("define: %v", err)
+	}
+
+	if err := key.Update(ctx, func(state *testState) {
+		state.Count = 2
+	}, WithVersion(2)); err != nil {
+		t.Fatalf("checked update: %v", err)
+	}
+
+	called := false
+	if err := key.Update(ctx, func(state *testState) {
+		called = true
+		state.Count = 99
+	}, WithVersion(2)); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale checked update error = %v", err)
+	}
+	if called {
+		t.Fatal("stale checked update called callback")
+	}
+
+	if err := key.Set(ctx, testState{Name: "future", Count: 99}, WithVersion(4)); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("future checked set error = %v", err)
+	}
+
+	value, meta, err := key.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot after conflicts: %v", err)
+	}
+	if value.Count != 2 || meta.Version != 2 {
+		t.Fatalf("after conflicts value=%+v meta=%+v", value, meta)
+	}
+
+	if err := key.Set(ctx, testState{Name: "set", Count: 3}, WithVersion(3)); err != nil {
+		t.Fatalf("checked set: %v", err)
+	}
+
+	locked, err := key.Lock(ctx)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	locked.Value().Count = 99
+	if err := locked.Sync(ctx, WithVersion(3)); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale checked sync error = %v", err)
+	}
+	locked.Unlock()
+
+	value, meta, err = key.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot after checked sync conflict: %v", err)
+	}
+	if value.Name != "set" || value.Count != 3 || meta.Version != 3 {
+		t.Fatalf("after checked sync conflict value=%+v meta=%+v", value, meta)
+	}
+}
+
 func TestSnapshotReturnsCopy(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager()

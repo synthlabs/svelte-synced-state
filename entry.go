@@ -65,13 +65,18 @@ func (e *entry) snapshotMessage(msgType MessageType, id string) (Message, error)
 	}, nil
 }
 
-func (e *entry) setRaw(raw json.RawMessage, id string) (Message, error) {
+func (e *entry) setRaw(raw json.RawMessage, id string, opts ...WriteOption) (Message, error) {
 	if raw == nil {
 		return Message{}, ErrMissingValue
 	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	version, err := e.nextVersionLocked(writeOptions(opts))
+	if err != nil {
+		return Message{}, err
+	}
 
 	if err := e.unmarshalLocked(raw); err != nil {
 		return Message{}, err
@@ -82,14 +87,22 @@ func (e *entry) setRaw(raw json.RawMessage, id string) (Message, error) {
 		return Message{}, err
 	}
 
-	e.version++
+	e.version = version
 	return Message{
 		Type:    MessageUpdate,
 		ID:      id,
 		Name:    e.name,
-		Version: e.version,
+		Version: version,
 		Value:   next,
 	}, nil
+}
+
+func (e *entry) nextVersionLocked(cfg writeConfig) (uint64, error) {
+	next := e.version + 1
+	if cfg.checkVersion && cfg.version != next {
+		return 0, ErrVersionConflict
+	}
+	return next, nil
 }
 
 func (e *entry) lock(ctx context.Context) error {
@@ -119,7 +132,7 @@ func (k *Key[T]) Name() string {
 	return k.entry.name
 }
 
-func (k *Key[T]) Update(ctx context.Context, update func(*T)) error {
+func (k *Key[T]) Update(ctx context.Context, update func(*T), opts ...WriteOption) error {
 	if err := k.entry.lock(ctx); err != nil {
 		return err
 	}
@@ -127,15 +140,20 @@ func (k *Key[T]) Update(ctx context.Context, update func(*T)) error {
 	var raw json.RawMessage
 	var version uint64
 	var err error
+	cfg := writeOptions(opts)
 	func() {
 		defer k.entry.mu.Unlock()
+
+		version, err = k.entry.nextVersionLocked(cfg)
+		if err != nil {
+			return
+		}
 
 		ptr := k.entry.value.(*T)
 		update(ptr)
 		raw, err = k.entry.marshalLocked()
 		if err == nil {
-			k.entry.version++
-			version = k.entry.version
+			k.entry.version = version
 		}
 	}()
 
@@ -152,7 +170,7 @@ func (k *Key[T]) Update(ctx context.Context, update func(*T)) error {
 	return nil
 }
 
-func (k *Key[T]) Set(ctx context.Context, value T) error {
+func (k *Key[T]) Set(ctx context.Context, value T, opts ...WriteOption) error {
 	if err := k.entry.lock(ctx); err != nil {
 		return err
 	}
@@ -160,15 +178,20 @@ func (k *Key[T]) Set(ctx context.Context, value T) error {
 	var raw json.RawMessage
 	var version uint64
 	var err error
+	cfg := writeOptions(opts)
 	func() {
 		defer k.entry.mu.Unlock()
+
+		version, err = k.entry.nextVersionLocked(cfg)
+		if err != nil {
+			return
+		}
 
 		ptr := k.entry.value.(*T)
 		*ptr = value
 		raw, err = k.entry.marshalLocked()
 		if err == nil {
-			k.entry.version++
-			version = k.entry.version
+			k.entry.version = version
 		}
 	}()
 
@@ -209,28 +232,45 @@ func (k *Key[T]) Lock(ctx context.Context) (*Locked[T], error) {
 	if err := k.entry.lock(ctx); err != nil {
 		return nil, err
 	}
+	raw, err := k.entry.marshalLocked()
+	if err != nil {
+		k.entry.mu.Unlock()
+		return nil, err
+	}
 	return &Locked[T]{
-		manager: k.manager,
-		entry:   k.entry,
-		value:   k.entry.value.(*T),
-		locked:  true,
+		manager:  k.manager,
+		entry:    k.entry,
+		value:    k.entry.value.(*T),
+		original: append(json.RawMessage(nil), raw...),
+		locked:   true,
 	}, nil
 }
 
 type Locked[T any] struct {
-	manager *Manager
-	entry   *entry
-	value   *T
-	locked  bool
+	manager  *Manager
+	entry    *entry
+	value    *T
+	original json.RawMessage
+	locked   bool
 }
 
 func (l *Locked[T]) Value() *T {
 	return l.value
 }
 
-func (l *Locked[T]) Sync(ctx context.Context) error {
+func (l *Locked[T]) Sync(ctx context.Context, opts ...WriteOption) error {
 	if !l.locked {
 		return ErrClosed
+	}
+
+	version, err := l.entry.nextVersionLocked(writeOptions(opts))
+	if err != nil {
+		if len(l.original) > 0 {
+			if restoreErr := l.entry.unmarshalLocked(l.original); restoreErr != nil {
+				return restoreErr
+			}
+		}
+		return err
 	}
 
 	raw, err := l.entry.marshalLocked()
@@ -238,11 +278,12 @@ func (l *Locked[T]) Sync(ctx context.Context) error {
 		return err
 	}
 
-	l.entry.version++
+	l.entry.version = version
+	l.original = append(l.original[:0], raw...)
 	l.manager.broadcast(ctx, Message{
 		Type:    MessageUpdate,
 		Name:    l.entry.name,
-		Version: l.entry.version,
+		Version: version,
 		Value:   raw,
 	})
 	return nil

@@ -3,6 +3,7 @@ package syncedstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 
@@ -116,8 +117,18 @@ func (c *client) handleMessage(ctx context.Context, msg Message) {
 			c.enqueue(errorMessage(msg.ID, msg.Name, err))
 			return
 		}
-		update, err := e.setRaw(msg.Value, msg.ID)
+		update, err := e.setRaw(msg.Value, msg.ID, WithVersion(msg.Version))
 		if err != nil {
+			if errors.Is(err, ErrVersionConflict) {
+				snapshot, snapshotErr := e.snapshotMessage(MessageSnapshot, msg.ID)
+				if snapshotErr != nil {
+					c.enqueue(errorMessage(msg.ID, msg.Name, snapshotErr))
+					return
+				}
+				snapshot.Error = err.Error()
+				c.enqueue(snapshot)
+				return
+			}
 			c.enqueue(errorMessage(msg.ID, msg.Name, err))
 			return
 		}

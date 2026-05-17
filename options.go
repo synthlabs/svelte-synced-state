@@ -12,6 +12,13 @@ type KeyOption func(*keyConfig)
 
 type keyConfig struct{}
 
+type WriteOption func(*writeConfig)
+
+type writeConfig struct {
+	checkVersion bool
+	version      uint64
+}
+
 type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
@@ -47,4 +54,19 @@ func WithWriteTimeout(timeout time.Duration) HandlerOption {
 			cfg.writeTimeout = timeout
 		}
 	}
+}
+
+func WithVersion(version uint64) WriteOption {
+	return func(cfg *writeConfig) {
+		cfg.checkVersion = true
+		cfg.version = version
+	}
+}
+
+func writeOptions(opts []WriteOption) writeConfig {
+	cfg := writeConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
 }
