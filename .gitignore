@@ -27,7 +27,6 @@ go.work.sum
 # Node/Svelte
 node_modules/
 .svelte-kit/
-dist/
 ui/node_modules/
 ui/.svelte-kit/
 ui/dist/
