@@ -9,14 +9,14 @@ import (
 
 type Manager struct {
 	mu          sync.RWMutex
-	entries     map[string]*entry
+	storage     storage
 	subscribers map[string]map[*client]struct{}
 	nextClient  atomic.Uint64
 }
 
 func NewManager(opts ...Option) *Manager {
 	m := &Manager{
-		entries:     make(map[string]*entry),
+		storage:     newMemoryStorage(),
 		subscribers: make(map[string]map[*client]struct{}),
 	}
 
@@ -33,24 +33,18 @@ func Define[T any](manager *Manager, name string, initial T, opts ...KeyOption) 
 		opt(&cfg)
 	}
 
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-
-	if _, ok := manager.entries[name]; ok {
-		return nil, ErrAlreadyDefined
+	e := newEntry(name, initial)
+	if err := manager.storage.define(name, e); err != nil {
+		return nil, err
 	}
 
-	e := newEntry(name, initial)
-	manager.entries[name] = e
 	return &Key[T]{manager: manager, entry: e}, nil
 }
 
 func Lookup[T any](manager *Manager, name string) (*Key[T], error) {
-	manager.mu.RLock()
-	e, ok := manager.entries[name]
-	manager.mu.RUnlock()
-	if !ok {
-		return nil, ErrNotFound
+	e, err := manager.storage.lookup(name)
+	if err != nil {
+		return nil, err
 	}
 
 	if e.typ != reflect.TypeOf((*T)(nil)).Elem() {
@@ -61,13 +55,7 @@ func Lookup[T any](manager *Manager, name string) (*Key[T], error) {
 }
 
 func (m *Manager) entry(name string) (*entry, error) {
-	m.mu.RLock()
-	e, ok := m.entries[name]
-	m.mu.RUnlock()
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return e, nil
+	return m.storage.lookup(name)
 }
 
 func (m *Manager) subscribe(c *client, name string) error {
