@@ -90,6 +90,50 @@ describe('SyncedClient', () => {
 		]);
 	});
 
+	it('routes indexed messages to exact and wildcard subscriptions', async () => {
+		const client = createClient();
+		const exactReceived: StateMessage[] = [];
+		const wildcardReceived: StateMessage[] = [];
+
+		client.subscribe('customer:123', (message) => exactReceived.push(message));
+		client.subscribe('customer:*', (message) => wildcardReceived.push(message));
+
+		const socket = FakeWebSocket.latest();
+		socket.open();
+		await flushMicrotasks();
+
+		socket.receive({ type: 'update', name: 'customer:123', version: 2, value: { name: 'one' } });
+		socket.receive({ type: 'update', name: 'customer:456', version: 2, value: { name: 'two' } });
+		socket.receive({ type: 'update', name: 'order:123', version: 2, value: { name: 'order' } });
+
+		expect(exactReceived).toEqual([
+			{ type: 'update', name: 'customer:123', version: 2, value: { name: 'one' } }
+		]);
+		expect(wildcardReceived).toEqual([
+			{ type: 'update', name: 'customer:123', version: 2, value: { name: 'one' } },
+			{ type: 'update', name: 'customer:456', version: 2, value: { name: 'two' } }
+		]);
+	});
+
+	it('deduplicates a local handler registered for exact and wildcard routes', async () => {
+		const client = createClient();
+		const received: StateMessage[] = [];
+		const handler = (message: StateMessage) => received.push(message);
+
+		client.subscribe('customer:123', handler);
+		client.subscribe('customer:*', handler);
+
+		const socket = FakeWebSocket.latest();
+		socket.open();
+		await flushMicrotasks();
+
+		socket.receive({ type: 'update', name: 'customer:123', version: 2, value: { name: 'one' } });
+
+		expect(received).toEqual([
+			{ type: 'update', name: 'customer:123', version: 2, value: { name: 'one' } }
+		]);
+	});
+
 	it('sends set and snapshot messages over the open socket', async () => {
 		const client = createClient();
 

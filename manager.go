@@ -59,8 +59,12 @@ func (m *Manager) entry(name string) (*entry, error) {
 }
 
 func (m *Manager) subscribe(c *client, name string) error {
-	if _, err := m.entry(name); err != nil {
+	if _, wildcard, err := parseWildcardAddress(name); err != nil {
 		return err
+	} else if !wildcard {
+		if _, err := m.entry(name); err != nil {
+			return err
+		}
 	}
 
 	m.mu.Lock()
@@ -112,10 +116,22 @@ func (m *Manager) broadcast(ctx context.Context, msg Message) {
 	default:
 	}
 
+	subscriptionNames := []string{msg.Name}
+	if wildcard, ok := wildcardForIndexedAddress(msg.Name); ok {
+		subscriptionNames = append(subscriptionNames, wildcard)
+	}
+
 	m.mu.RLock()
 	clients := make([]*client, 0, len(m.subscribers[msg.Name]))
-	for c := range m.subscribers[msg.Name] {
-		clients = append(clients, c)
+	seen := make(map[*client]struct{})
+	for _, name := range subscriptionNames {
+		for c := range m.subscribers[name] {
+			if _, ok := seen[c]; ok {
+				continue
+			}
+			seen[c] = struct{}{}
+			clients = append(clients, c)
+		}
 	}
 	m.mu.RUnlock()
 

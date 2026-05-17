@@ -78,6 +78,9 @@ func (c *client) handleMessage(ctx context.Context, msg Message) {
 			c.enqueue(errorMessage(msg.ID, msg.Name, err))
 			return
 		}
+		if isWildcardAddress(msg.Name) {
+			return
+		}
 		e, _ := c.manager.entry(msg.Name)
 		snapshot, err := e.snapshotMessage(MessageSnapshot, msg.ID)
 		if err != nil {
@@ -88,6 +91,10 @@ func (c *client) handleMessage(ctx context.Context, msg Message) {
 	case MessageUnsubscribe:
 		c.manager.unsubscribe(c, msg.Name)
 	case MessageSnapshot:
+		if err := rejectWildcardName(msg.Name); err != nil {
+			c.enqueue(errorMessage(msg.ID, msg.Name, err))
+			return
+		}
 		e, err := c.manager.entry(msg.Name)
 		if err != nil {
 			c.enqueue(errorMessage(msg.ID, msg.Name, err))
@@ -100,6 +107,10 @@ func (c *client) handleMessage(ctx context.Context, msg Message) {
 		}
 		c.enqueue(snapshot)
 	case MessageSet:
+		if err := rejectWildcardName(msg.Name); err != nil {
+			c.enqueue(errorMessage(msg.ID, msg.Name, err))
+			return
+		}
 		e, err := c.manager.entry(msg.Name)
 		if err != nil {
 			c.enqueue(errorMessage(msg.ID, msg.Name, err))
@@ -114,6 +125,15 @@ func (c *client) handleMessage(ctx context.Context, msg Message) {
 	default:
 		c.enqueue(errorMessage(msg.ID, msg.Name, errUnknownMessageType))
 	}
+}
+
+func rejectWildcardName(name string) error {
+	if _, wildcard, err := parseWildcardAddress(name); err != nil {
+		return err
+	} else if wildcard {
+		return ErrWildcardName
+	}
+	return nil
 }
 
 func (c *client) writeLoop(ctx context.Context, cfg handlerConfig) {

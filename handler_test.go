@@ -426,3 +426,162 @@ func TestHandlerMultipleClientsSeeConcurrentServerUpdates(t *testing.T) {
 		t.Fatalf("snapshot value=%+v meta=%+v", value, meta)
 	}
 }
+
+func TestHandlerWildcardSubscribeReceivesFutureIndexedUpdates(t *testing.T) {
+	manager := NewManager()
+	if _, err := Define(manager, "Ready", testState{Name: "ready"}); err != nil {
+		t.Fatalf("define ready: %v", err)
+	}
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	conn := dialClient(t, wsURL(server.URL))
+	writeMessage(t, conn, Message{Type: MessageSubscribe, ID: "wildcard-sub", Name: "customer:*"})
+	writeMessage(t, conn, Message{Type: MessageSnapshot, ID: "barrier", Name: "Ready"})
+	if msg := readMessage(t, conn); msg.Type != MessageSnapshot || msg.ID != "barrier" {
+		t.Fatalf("barrier snapshot = %+v", msg)
+	}
+
+	key, err := DefineIndexed(manager, "customer", "123", testState{Name: "customer"})
+	if err != nil {
+		t.Fatalf("define indexed: %v", err)
+	}
+	if err := key.Set(context.Background(), testState{Name: "customer", Count: 1}); err != nil {
+		t.Fatalf("set indexed: %v", err)
+	}
+
+	update := readMessage(t, conn)
+	if update.Type != MessageUpdate || update.Name != "customer:123" || update.Version != 2 {
+		t.Fatalf("wildcard update = %+v", update)
+	}
+	value := decodeValue[testState](t, update)
+	if value.Count != 1 {
+		t.Fatalf("wildcard update value = %+v", value)
+	}
+}
+
+func TestHandlerWildcardFanoutAndExactFanout(t *testing.T) {
+	manager := NewManager()
+	customer, err := DefineIndexed(manager, "customer", "123", testState{Name: "customer"})
+	if err != nil {
+		t.Fatalf("define customer: %v", err)
+	}
+	order, err := DefineIndexed(manager, "order", "123", testState{Name: "order"})
+	if err != nil {
+		t.Fatalf("define order: %v", err)
+	}
+
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	exact := dialClient(t, wsURL(server.URL))
+	wildcard := dialClient(t, wsURL(server.URL))
+
+	writeMessage(t, exact, Message{Type: MessageSubscribe, ID: "exact-sub", Name: "customer:123"})
+	_ = readMessage(t, exact)
+	writeMessage(t, wildcard, Message{Type: MessageSubscribe, ID: "wildcard-sub", Name: "customer:*"})
+	writeMessage(t, wildcard, Message{Type: MessageSnapshot, ID: "wildcard-barrier", Name: "customer:123"})
+	if msg := readMessage(t, wildcard); msg.Type != MessageSnapshot || msg.ID != "wildcard-barrier" {
+		t.Fatalf("wildcard barrier snapshot = %+v", msg)
+	}
+
+	if err := customer.Set(context.Background(), testState{Name: "customer", Count: 1}); err != nil {
+		t.Fatalf("set customer: %v", err)
+	}
+	for _, conn := range []*websocket.Conn{exact, wildcard} {
+		update := readMessage(t, conn)
+		if update.Type != MessageUpdate || update.Name != "customer:123" || update.Version != 2 {
+			t.Fatalf("customer update = %+v", update)
+		}
+	}
+
+	if err := order.Set(context.Background(), testState{Name: "order", Count: 1}); err != nil {
+		t.Fatalf("set order: %v", err)
+	}
+	if msg, ok := readMessageWithin(t, wildcard, 50*time.Millisecond); ok {
+		t.Fatalf("unexpected wildcard message for other scope: %+v", msg)
+	}
+}
+
+func TestHandlerWildcardDeduplicatesClientSubscribedToExactAndWildcard(t *testing.T) {
+	manager := NewManager()
+	key, err := DefineIndexed(manager, "customer", "123", testState{Name: "customer"})
+	if err != nil {
+		t.Fatalf("define indexed: %v", err)
+	}
+
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	conn := dialClient(t, wsURL(server.URL))
+	writeMessage(t, conn, Message{Type: MessageSubscribe, ID: "exact-sub", Name: "customer:123"})
+	_ = readMessage(t, conn)
+	writeMessage(t, conn, Message{Type: MessageSubscribe, ID: "wildcard-sub", Name: "customer:*"})
+	writeMessage(t, conn, Message{Type: MessageSnapshot, ID: "wildcard-barrier", Name: "customer:123"})
+	if msg := readMessage(t, conn); msg.Type != MessageSnapshot || msg.ID != "wildcard-barrier" {
+		t.Fatalf("wildcard barrier snapshot = %+v", msg)
+	}
+
+	if err := key.Set(context.Background(), testState{Name: "customer", Count: 1}); err != nil {
+		t.Fatalf("set indexed: %v", err)
+	}
+	update := readMessage(t, conn)
+	if update.Type != MessageUpdate || update.Name != "customer:123" || update.Version != 2 {
+		t.Fatalf("update = %+v", update)
+	}
+	if msg, ok := readMessageWithin(t, conn, 50*time.Millisecond); ok {
+		t.Fatalf("duplicate update = %+v", msg)
+	}
+}
+
+func TestHandlerWildcardUnsubscribeStopsDelivery(t *testing.T) {
+	manager := NewManager()
+	key, err := DefineIndexed(manager, "customer", "123", testState{Name: "customer"})
+	if err != nil {
+		t.Fatalf("define indexed: %v", err)
+	}
+
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	conn := dialClient(t, wsURL(server.URL))
+	writeMessage(t, conn, Message{Type: MessageSubscribe, ID: "wildcard-sub", Name: "customer:*"})
+	writeMessage(t, conn, Message{Type: MessageUnsubscribe, ID: "wildcard-unsub", Name: "customer:*"})
+	writeMessage(t, conn, Message{Type: MessageSnapshot, ID: "barrier", Name: "customer:123"})
+	_ = readMessage(t, conn)
+
+	if err := key.Set(context.Background(), testState{Name: "customer", Count: 1}); err != nil {
+		t.Fatalf("set indexed: %v", err)
+	}
+	if msg, ok := readMessageWithin(t, conn, 50*time.Millisecond); ok {
+		t.Fatalf("unexpected wildcard message after unsubscribe: %+v", msg)
+	}
+}
+
+func TestHandlerWildcardSnapshotAndSetReturnErrors(t *testing.T) {
+	manager := NewManager()
+	if _, err := DefineIndexed(manager, "customer", "123", testState{Name: "customer"}); err != nil {
+		t.Fatalf("define indexed: %v", err)
+	}
+
+	server := httptest.NewServer(manager.Handler())
+	t.Cleanup(server.Close)
+
+	conn := dialClient(t, wsURL(server.URL))
+	writeMessage(t, conn, Message{Type: MessageSnapshot, ID: "wildcard-snapshot", Name: "customer:*"})
+	msg := readMessage(t, conn)
+	if msg.Type != MessageError || msg.ID != "wildcard-snapshot" || msg.Error != ErrWildcardName.Error() {
+		t.Fatalf("wildcard snapshot error = %+v", msg)
+	}
+
+	writeMessage(t, conn, Message{
+		Type:  MessageSet,
+		ID:    "wildcard-set",
+		Name:  "customer:*",
+		Value: json.RawMessage(`{"name":"customer","count":1}`),
+	})
+	msg = readMessage(t, conn)
+	if msg.Type != MessageError || msg.ID != "wildcard-set" || msg.Error != ErrWildcardName.Error() {
+		t.Fatalf("wildcard set error = %+v", msg)
+	}
+}

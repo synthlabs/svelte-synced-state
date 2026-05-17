@@ -4,6 +4,8 @@ Easily sync Go backend state with Svelte over WebSockets.
 
 This package keeps typed state objects in a Go process and mirrors them into Svelte 5 `$state` objects. The backend exports a standard `net/http` WebSocket handler. The frontend subscribes to named state objects, applies server snapshots and updates, and can sync local changes back as full-value replacements.
 
+This project is based on the same state-syncing model as [tauri-svelte-synced-store](https://github.com/synthlabs/tauri-svelte-synced-store), adapted from Tauri events to a standard Go WebSocket backend.
+
 ## Go
 
 ```go

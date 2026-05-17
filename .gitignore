@@ -39,3 +39,5 @@ ui/coverage/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+docs/*

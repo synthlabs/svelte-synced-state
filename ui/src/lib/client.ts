@@ -1,4 +1,5 @@
 import type { StateMessage } from './protocol.js';
+import { wildcardForAddress } from './address.js';
 
 type WebSocketLike = typeof WebSocket;
 
@@ -120,8 +121,19 @@ export class SyncedClient {
 			return;
 		}
 
-		const handlers = this.#subscriptions.get(message.name);
-		if (!handlers) {
+		const handlers = new Set<StateMessageHandler>();
+		const exactHandlers = this.#subscriptions.get(message.name);
+		for (const handler of exactHandlers ?? []) {
+			handlers.add(handler);
+		}
+
+		const wildcard = wildcardForAddress(message.name);
+		const wildcardHandlers = wildcard ? this.#subscriptions.get(wildcard) : undefined;
+		for (const handler of wildcardHandlers ?? []) {
+			handlers.add(handler);
+		}
+
+		if (handlers.size === 0) {
 			return;
 		}
 
