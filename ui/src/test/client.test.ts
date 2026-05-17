@@ -1,68 +1,82 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { SyncedClient, resetDefaultClient } from '../lib/client.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SyncedClient, getDefaultClient, resetDefaultClient } from '../lib/client.js';
 import type { StateMessage } from '../lib/protocol.js';
+import { FakeWebSocket, flushMicrotasks } from './fake-websocket.js';
 
-class FakeWebSocket {
-	static CONNECTING = 0;
-	static OPEN = 1;
-	static CLOSING = 2;
-	static CLOSED = 3;
-	static instances: FakeWebSocket[] = [];
+const WebSocketCtor = FakeWebSocket as unknown as typeof WebSocket;
+const defaultURL = 'ws://example.test/synced-state';
 
-	readyState = FakeWebSocket.CONNECTING;
-	sent: string[] = [];
-	onopen: ((event: Event) => void) | null = null;
-	onmessage: ((event: MessageEvent) => void) | null = null;
-	onerror: ((event: Event) => void) | null = null;
-	onclose: ((event: CloseEvent) => void) | null = null;
-
-	constructor(
-		public url: string,
-		public protocols?: string | string[]
-	) {
-		FakeWebSocket.instances.push(this);
-	}
-
-	send(data: string) {
-		this.sent.push(data);
-	}
-
-	close() {
-		this.readyState = FakeWebSocket.CLOSED;
-		this.onclose?.(new CloseEvent('close'));
-	}
-
-	open() {
-		this.readyState = FakeWebSocket.OPEN;
-		this.onopen?.(new Event('open'));
-	}
-
-	receive(message: StateMessage) {
-		this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(message) }));
-	}
+function createClient(options: { url?: string | URL; protocols?: string | string[] } = {}) {
+	return new SyncedClient({
+		url: defaultURL,
+		WebSocketCtor,
+		...options
+	});
 }
 
 afterEach(() => {
-	FakeWebSocket.instances = [];
 	resetDefaultClient();
+	FakeWebSocket.reset();
+	vi.unstubAllGlobals();
 });
 
 describe('SyncedClient', () => {
+	it('resolves the browser default URL and forwards protocols', async () => {
+		vi.stubGlobal('location', { protocol: 'https:', host: 'app.example.test' });
+		const client = new SyncedClient({ protocols: ['state.v1'], WebSocketCtor });
+
+		const pending = client.connect();
+		const socket = FakeWebSocket.latest();
+		expect(socket.url).toBe('wss://app.example.test/synced-state');
+		expect(socket.protocols).toEqual(['state.v1']);
+
+		socket.open();
+		await expect(pending).resolves.toBeUndefined();
+	});
+
+	it('requires an explicit URL outside the browser', () => {
+		vi.stubGlobal('location', undefined);
+
+		expect(() => new SyncedClient({ WebSocketCtor })).toThrow(
+			'SyncedClient requires a URL outside the browser'
+		);
+	});
+
+	it('reuses an in-flight or open connection', async () => {
+		const client = createClient();
+
+		const first = client.connect();
+		const second = client.connect();
+		expect(FakeWebSocket.instances).toHaveLength(1);
+
+		FakeWebSocket.latest().open();
+		await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+
+		await client.connect();
+		expect(FakeWebSocket.instances).toHaveLength(1);
+	});
+
+	it('rejects the connection promise when the socket errors before opening', async () => {
+		const client = createClient();
+
+		const pending = client.connect();
+		FakeWebSocket.latest().fail();
+
+		await expect(pending).rejects.toThrow('websocket connection failed');
+	});
+
 	it('subscribes once connected and routes messages by state name', async () => {
-		const client = new SyncedClient({
-			url: 'ws://example.test/synced-state',
-			WebSocketCtor: FakeWebSocket as unknown as typeof WebSocket
-		});
+		const client = createClient();
 		const received: StateMessage[] = [];
 
 		client.subscribe('TestState', (message) => received.push(message));
 
-		const socket = FakeWebSocket.instances[0];
-		expect(socket.url).toBe('ws://example.test/synced-state');
+		const socket = FakeWebSocket.latest();
+		expect(socket.url).toBe(defaultURL);
 		socket.open();
-		await Promise.resolve();
+		await flushMicrotasks();
 
-		expect(JSON.parse(socket.sent[0])).toMatchObject({
+		expect(socket.sentMessages()[0]).toMatchObject({
 			type: 'subscribe',
 			name: 'TestState'
 		});
@@ -76,41 +90,101 @@ describe('SyncedClient', () => {
 		]);
 	});
 
-	it('sends full value replacement messages', async () => {
-		const client = new SyncedClient({
-			url: 'ws://example.test/synced-state',
-			WebSocketCtor: FakeWebSocket as unknown as typeof WebSocket
-		});
+	it('sends set and snapshot messages over the open socket', async () => {
+		const client = createClient();
 
-		const pending = client.set('TestState', { count: 3 });
-		const socket = FakeWebSocket.instances[0];
+		const setPending = client.set('TestState', { count: 3 });
+		const socket = FakeWebSocket.latest();
 		socket.open();
-		expect(await pending).toBe(true);
+		expect(await setPending).toBe(true);
 
-		expect(JSON.parse(socket.sent[0])).toMatchObject({
+		expect(socket.sentMessages()[0]).toMatchObject({
 			type: 'set',
 			name: 'TestState',
 			value: { count: 3 }
 		});
+
+		await expect(client.snapshot('TestState')).resolves.toBe(true);
+		expect(socket.sentMessages().at(-1)).toMatchObject({
+			type: 'snapshot',
+			name: 'TestState'
+		});
 	});
 
-	it('unsubscribes when the last local handler is removed', async () => {
-		const client = new SyncedClient({
-			url: 'ws://example.test/synced-state',
-			WebSocketCtor: FakeWebSocket as unknown as typeof WebSocket
-		});
+	it('delivers messages to every local handler and unsubscribes only after the last one is removed', async () => {
+		const client = createClient();
+		const firstReceived: StateMessage[] = [];
+		const secondReceived: StateMessage[] = [];
 
-		const unsubscribe = client.subscribe('TestState', () => {});
-		const socket = FakeWebSocket.instances[0];
+		const unsubscribeFirst = client.subscribe('TestState', (message) => firstReceived.push(message));
+		const unsubscribeSecond = client.subscribe('TestState', (message) => secondReceived.push(message));
+
+		const socket = FakeWebSocket.latest();
 		socket.open();
-		await Promise.resolve();
+		await flushMicrotasks();
 
-		unsubscribe();
-		await Promise.resolve();
+		socket.receive({ type: 'update', name: 'TestState', version: 2, value: { count: 2 } });
+		expect(firstReceived).toHaveLength(1);
+		expect(secondReceived).toHaveLength(1);
 
-		expect(JSON.parse(socket.sent.at(-1) ?? '{}')).toMatchObject({
+		unsubscribeFirst();
+		await flushMicrotasks();
+		expect(socket.sentMessages().some((message) => message.type === 'unsubscribe')).toBe(false);
+
+		socket.receive({ type: 'update', name: 'TestState', version: 3, value: { count: 3 } });
+		expect(firstReceived).toHaveLength(1);
+		expect(secondReceived).toHaveLength(2);
+
+		unsubscribeSecond();
+		await flushMicrotasks();
+		expect(socket.sentMessages().at(-1)).toMatchObject({
 			type: 'unsubscribe',
 			name: 'TestState'
 		});
+	});
+
+	it('ignores messages it cannot route to a subscription', async () => {
+		const client = createClient();
+		const received: StateMessage[] = [];
+
+		client.subscribe('TestState', (message) => received.push(message));
+		const socket = FakeWebSocket.latest();
+		socket.open();
+		await flushMicrotasks();
+
+		socket.receiveRaw({ type: 'snapshot', name: 'TestState', value: { count: 1 } });
+		socket.receive({ type: 'snapshot', version: 1, value: { count: 2 } });
+		socket.receive({ type: 'snapshot', name: 'OtherState', version: 1, value: { count: 3 } });
+
+		expect(received).toEqual([]);
+	});
+
+	it('can close and reconnect with a new socket', async () => {
+		const client = createClient();
+
+		const firstConnect = client.connect();
+		const firstSocket = FakeWebSocket.latest();
+		firstSocket.open();
+		await firstConnect;
+
+		client.close(3000, 'done');
+		expect(firstSocket.readyState).toBe(FakeWebSocket.CLOSED);
+		expect(firstSocket.closeCode).toBe(3000);
+		expect(firstSocket.closeReason).toBe('done');
+
+		const secondConnect = client.connect();
+		const secondSocket = FakeWebSocket.latest();
+		expect(secondSocket).not.toBe(firstSocket);
+		expect(FakeWebSocket.instances).toHaveLength(2);
+		secondSocket.open();
+		await secondConnect;
+	});
+
+	it('reuses the default client until connection options change', () => {
+		const first = getDefaultClient({ url: 'ws://one.test/synced-state', WebSocketCtor });
+		expect(getDefaultClient()).toBe(first);
+
+		const second = getDefaultClient({ url: 'ws://two.test/synced-state', WebSocketCtor });
+		expect(second).not.toBe(first);
 	});
 });
