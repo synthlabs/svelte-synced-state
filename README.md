@@ -51,6 +51,17 @@ func main() {
 }
 ```
 
+Handler options can tune the websocket send buffer. By default, a client is
+closed when its send buffer fills. Use `WithBlockOnFullBuffer` to apply
+backpressure to the goroutine sending the update instead:
+
+```go
+http.Handle("/synced-state", manager.Handler(
+	syncedstate.WithSendBuffer(128),
+	syncedstate.WithBlockOnFullBuffer(),
+))
+```
+
 For longer critical sections, use the lower-level lock handle:
 
 ```go

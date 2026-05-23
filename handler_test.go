@@ -3,6 +3,7 @@ package syncedstate
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -30,6 +31,42 @@ func dialClient(t *testing.T, url string) *websocket.Conn {
 		_ = conn.Close(websocket.StatusNormalClosure, "test done")
 	})
 	return conn
+}
+
+func dialAcceptedConn(t *testing.T) (*websocket.Conn, *websocket.Conn) {
+	t.Helper()
+
+	accepted := make(chan *websocket.Conn, 1)
+	acceptErr := make(chan error, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- conn
+		<-release
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+
+	clientConn := dialClient(t, wsURL(server.URL))
+
+	var serverConn *websocket.Conn
+	select {
+	case serverConn = <-accepted:
+	case err := <-acceptErr:
+		t.Fatalf("accept: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("accept timeout")
+	}
+	t.Cleanup(func() {
+		_ = serverConn.Close(websocket.StatusNormalClosure, "test done")
+	})
+	return serverConn, clientConn
 }
 
 func writeMessage(t *testing.T, conn *websocket.Conn, msg Message) {
@@ -110,6 +147,98 @@ func decodeValue[T any](t *testing.T, msg Message) T {
 		t.Fatalf("value unmarshal: %v", err)
 	}
 	return value
+}
+
+func TestClientEnqueueClosesWhenSendBufferFull(t *testing.T) {
+	serverConn, _ := dialAcceptedConn(t)
+	c := &client{
+		conn: serverConn,
+		send: make(chan Message, 1),
+		done: make(chan struct{}),
+	}
+
+	c.send <- Message{Type: MessageUpdate, ID: "first"}
+	if ok := c.enqueue(context.Background(), Message{Type: MessageUpdate, ID: "second"}); !ok {
+		t.Fatal("enqueue returned false before context cancellation")
+	}
+
+	select {
+	case <-c.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client was not closed after send buffer filled")
+	}
+}
+
+func TestClientEnqueueBlocksWhenSendBufferFull(t *testing.T) {
+	serverConn, _ := dialAcceptedConn(t)
+	c := &client{
+		conn:              serverConn,
+		send:              make(chan Message, 1),
+		blockOnFullBuffer: true,
+		done:              make(chan struct{}),
+	}
+
+	c.send <- Message{Type: MessageUpdate, ID: "first"}
+	enqueued := make(chan bool, 1)
+	go func() {
+		enqueued <- c.enqueue(context.Background(), Message{Type: MessageUpdate, ID: "second"})
+	}()
+
+	select {
+	case <-enqueued:
+		t.Fatal("enqueue completed while send buffer was full")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if msg := <-c.send; msg.ID != "first" {
+		t.Fatalf("first queued message = %+v", msg)
+	}
+
+	select {
+	case ok := <-enqueued:
+		if !ok {
+			t.Fatal("enqueue returned false without context cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue did not complete after send buffer space was available")
+	}
+
+	if msg := <-c.send; msg.ID != "second" {
+		t.Fatalf("second queued message = %+v", msg)
+	}
+}
+
+func TestClientEnqueueStopsBlockingWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &client{
+		send:              make(chan Message, 1),
+		blockOnFullBuffer: true,
+		done:              make(chan struct{}),
+	}
+	defer close(c.done)
+
+	c.send <- Message{Type: MessageUpdate, ID: "first"}
+	enqueued := make(chan bool, 1)
+	go func() {
+		enqueued <- c.enqueue(ctx, Message{Type: MessageUpdate, ID: "second"})
+	}()
+
+	select {
+	case <-enqueued:
+		t.Fatal("enqueue completed while send buffer was full")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case ok := <-enqueued:
+		if ok {
+			t.Fatal("enqueue returned true after context cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue did not stop after context cancellation")
+	}
 }
 
 func TestHandlerSubscribeSnapshotAndBroadcast(t *testing.T) {

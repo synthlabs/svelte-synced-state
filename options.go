@@ -22,9 +22,10 @@ type writeConfig struct {
 type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
-	acceptOptions websocket.AcceptOptions
-	sendBuffer    int
-	writeTimeout  time.Duration
+	acceptOptions     websocket.AcceptOptions
+	sendBuffer        int
+	blockOnFullBuffer bool
+	writeTimeout      time.Duration
 }
 
 func defaultHandlerConfig() handlerConfig {
@@ -45,6 +46,12 @@ func WithSendBuffer(size int) HandlerOption {
 		if size > 0 {
 			cfg.sendBuffer = size
 		}
+	}
+}
+
+func WithBlockOnFullBuffer() HandlerOption {
+	return func(cfg *handlerConfig) {
+		cfg.blockOnFullBuffer = true
 	}
 }
 

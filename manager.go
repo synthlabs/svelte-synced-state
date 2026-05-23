@@ -136,6 +136,8 @@ func (m *Manager) broadcast(ctx context.Context, msg Message) {
 	m.mu.RUnlock()
 
 	for _, c := range clients {
-		c.enqueue(msg)
+		if !c.enqueue(ctx, msg) {
+			return
+		}
 	}
 }
