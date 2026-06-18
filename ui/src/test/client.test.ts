@@ -231,4 +231,89 @@ describe('SyncedClient', () => {
 		const second = getDefaultClient({ url: 'ws://two.test/synced-state', WebSocketCtor });
 		expect(second).not.toBe(first);
 	});
+
+	it('reconnects with backoff and re-subscribes after an unexpected close', async () => {
+		vi.useFakeTimers();
+		try {
+			const client = new SyncedClient({
+				url: defaultURL,
+				WebSocketCtor,
+				reconnectDelayMs: 1000,
+				reconnectMaxDelayMs: 1000
+			});
+			const received: StateMessage[] = [];
+
+			client.subscribe('TestState', (message) => received.push(message));
+
+			const first = FakeWebSocket.latest();
+			first.open();
+			await flushMicrotasks();
+			expect(first.sentMessages().filter((message) => message.type === 'subscribe')).toHaveLength(1);
+
+			first.receive({ type: 'snapshot', name: 'TestState', version: 1, value: { count: 1 } });
+			expect(received).toEqual([
+				{ type: 'snapshot', name: 'TestState', version: 1, value: { count: 1 } }
+			]);
+
+			// Simulate the socket dropping while subscribed.
+			first.close(1006, 'abnormal');
+			await flushMicrotasks();
+
+			// Reconnect is scheduled with backoff; advance past the delay.
+			await vi.advanceTimersByTimeAsync(1000);
+
+			const second = FakeWebSocket.latest();
+			expect(second).not.toBe(first);
+			expect(second.readyState).toBe(FakeWebSocket.CONNECTING);
+
+			second.open();
+			await flushMicrotasks();
+
+			// The active subscription was re-sent on the new socket...
+			expect(
+				second.sentMessages().some((message) => message.type === 'subscribe' && message.name === 'TestState')
+			).toBe(true);
+
+			// ...so live updates resume without re-subscribing manually.
+			second.receive({ type: 'snapshot', name: 'TestState', version: 2, value: { count: 2 } });
+			expect(received).toEqual([
+				{ type: 'snapshot', name: 'TestState', version: 1, value: { count: 1 } },
+				{ type: 'snapshot', name: 'TestState', version: 2, value: { count: 2 } }
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not reconnect after an explicit close', async () => {
+		const client = new SyncedClient({ url: defaultURL, WebSocketCtor, reconnectDelayMs: 1 });
+
+		const opened = client.connect();
+		const first = FakeWebSocket.latest();
+		first.open();
+		await opened;
+
+		client.close();
+		expect(FakeWebSocket.instances).toHaveLength(1);
+
+		// A fast backoff means any incorrectly-scheduled reconnect would fire here.
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(FakeWebSocket.instances).toHaveLength(1);
+	});
+
+	it('reports connection status through onStatusChange', async () => {
+		const statuses: string[] = [];
+		const client = new SyncedClient({
+			url: defaultURL,
+			WebSocketCtor,
+			onStatusChange: (status) => statuses.push(status)
+		});
+
+		client.subscribe('TestState', () => {});
+		expect(statuses.at(-1)).toBe('connecting');
+
+		FakeWebSocket.latest().open();
+		await flushMicrotasks();
+		expect(statuses.at(-1)).toBe('connected');
+	});
 });

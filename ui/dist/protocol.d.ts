@@ -7,3 +7,8 @@ export interface StateMessage<T = unknown> {
     value?: T;
     error?: string;
 }
+export interface SyncResult {
+    ok: boolean;
+    version?: number;
+    error?: string;
+}

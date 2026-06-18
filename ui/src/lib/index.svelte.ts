@@ -246,5 +246,6 @@ function syncResult(ok: boolean, version?: number, error?: string): SyncResult {
 }
 
 export { getDefaultClient, resetDefaultClient, SyncedClient } from './client.js';
+export type { ConnectionStatus } from './client.js';
 export { indexedAddress, indexedWildcard, singletonAddress } from './address.js';
 export type { MessageType, StateMessage, SyncResult } from './protocol.js';

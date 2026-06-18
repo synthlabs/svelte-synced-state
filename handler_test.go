@@ -287,6 +287,77 @@ func TestHandlerSubscribeSnapshotAndBroadcast(t *testing.T) {
 	}
 }
 
+func TestHandlerPingsKeepHealthyClientsAlive(t *testing.T) {
+	manager := NewManager()
+	key, err := Define(manager, "TestState", testState{Name: "initial", Count: 1})
+	if err != nil {
+		t.Fatalf("define: %v", err)
+	}
+
+	server := httptest.NewServer(manager.Handler(WithPingInterval(50 * time.Millisecond)))
+	t.Cleanup(server.Close)
+
+	conn := dialClient(t, wsURL(server.URL))
+
+	writeMessage(t, conn, Message{Type: MessageSubscribe, ID: "sub", Name: "TestState"})
+
+	// Read continuously so the client answers server pings — a real browser always
+	// processes incoming frames; a coder/websocket client only auto-pongs while a
+	// Read is in flight. Collect updates for the assertion below.
+	updates := make(chan Message, 16)
+	readErr := make(chan error, 1)
+	go func() {
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			typ, data, err := conn.Read(ctx)
+			cancel()
+			if err != nil {
+				readErr <- err
+				return
+			}
+			if typ != websocket.MessageText {
+				continue
+			}
+			var msg Message
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			if msg.Type == MessageUpdate {
+				select {
+				case updates <- msg:
+				default:
+				}
+			}
+		}
+	}()
+
+	// Wait well past several ping intervals; a healthy client must stay connected.
+	// If the ping path wrongly closed the connection, readErr fires here.
+	time.Sleep(250 * time.Millisecond)
+	select {
+	case err := <-readErr:
+		t.Fatalf("connection closed during ping window: %v", err)
+	default:
+	}
+
+	if err := key.Update(context.Background(), func(state *testState) {
+		state.Count = 2
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	select {
+	case msg := <-updates:
+		if msg.Type != MessageUpdate || msg.Version != 2 {
+			t.Fatalf("update = %+v", msg)
+		}
+	case err := <-readErr:
+		t.Fatalf("connection closed before update arrived: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("update not received after pings")
+	}
+}
+
 func TestHandlerSetFromClient(t *testing.T) {
 	manager := NewManager()
 	key, err := Define(manager, "TestState", testState{Name: "initial", Count: 1})

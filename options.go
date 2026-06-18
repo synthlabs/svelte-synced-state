@@ -26,6 +26,7 @@ type handlerConfig struct {
 	sendBuffer        int
 	blockOnFullBuffer bool
 	writeTimeout      time.Duration
+	pingInterval      time.Duration
 }
 
 func defaultHandlerConfig() handlerConfig {
@@ -59,6 +60,18 @@ func WithWriteTimeout(timeout time.Duration) HandlerOption {
 	return func(cfg *handlerConfig) {
 		if timeout > 0 {
 			cfg.writeTimeout = timeout
+		}
+	}
+}
+
+// WithPingInterval enables server-side keepalive: the handler pings each client on a
+// ticker and closes the connection if a pong is not received within the interval. This
+// surfaces half-open / silently-dropped links (laptop sleep, NAT idle-reap) as a real
+// close event so the client can reconnect. Zero (the default) disables keepalive.
+func WithPingInterval(interval time.Duration) HandlerOption {
+	return func(cfg *handlerConfig) {
+		if interval > 0 {
+			cfg.pingInterval = interval
 		}
 	}
 }

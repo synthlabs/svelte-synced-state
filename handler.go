@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -152,6 +153,15 @@ func rejectWildcardName(name string) error {
 func (c *client) writeLoop(ctx context.Context, cfg handlerConfig) {
 	defer c.close(websocket.StatusNormalClosure, "closed")
 
+	// Keepalive: ping on a ticker and close if no pong arrives within the interval.
+	// This runs inside the single write loop so pings never race message writes.
+	var pings <-chan time.Time
+	if cfg.pingInterval > 0 {
+		ticker := time.NewTicker(cfg.pingInterval)
+		defer ticker.Stop()
+		pings = ticker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -166,6 +176,15 @@ func (c *client) writeLoop(ctx context.Context, cfg handlerConfig) {
 
 			writeCtx, cancel := context.WithTimeout(ctx, cfg.writeTimeout)
 			err = c.conn.Write(writeCtx, websocket.MessageText, data)
+			cancel()
+			if err != nil {
+				return
+			}
+		case <-pings:
+			// A missed pong makes Ping return within this deadline; closing here
+			// surfaces the dead link so the client can reconnect.
+			pingCtx, cancel := context.WithTimeout(ctx, cfg.pingInterval)
+			err := c.conn.Ping(pingCtx)
 			cancel()
 			if err != nil {
 				return
