@@ -3,6 +3,7 @@ package syncedstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"sync"
 	"time"
@@ -158,9 +159,13 @@ func (k *Key[T]) Update(ctx context.Context, update func(*T), opts ...WriteOptio
 	}()
 
 	if err != nil {
+		if errors.Is(err, ErrVersionConflict) {
+			k.manager.logger.Warn("version conflict", "component", "entry", "name", k.entry.name)
+		}
 		return err
 	}
 
+	k.manager.logger.Debug("committed write", "component", "entry", "name", k.entry.name, "version", version)
 	k.manager.broadcast(ctx, Message{
 		Type:    MessageUpdate,
 		Name:    k.entry.name,
@@ -196,9 +201,13 @@ func (k *Key[T]) Set(ctx context.Context, value T, opts ...WriteOption) error {
 	}()
 
 	if err != nil {
+		if errors.Is(err, ErrVersionConflict) {
+			k.manager.logger.Warn("version conflict", "component", "entry", "name", k.entry.name)
+		}
 		return err
 	}
 
+	k.manager.logger.Debug("committed write", "component", "entry", "name", k.entry.name, "version", version)
 	k.manager.broadcast(ctx, Message{
 		Type:    MessageUpdate,
 		Name:    k.entry.name,
@@ -270,6 +279,9 @@ func (l *Locked[T]) Sync(ctx context.Context, opts ...WriteOption) error {
 				return restoreErr
 			}
 		}
+		if errors.Is(err, ErrVersionConflict) {
+			l.manager.logger.Warn("version conflict", "component", "entry", "name", l.entry.name)
+		}
 		return err
 	}
 
@@ -280,6 +292,7 @@ func (l *Locked[T]) Sync(ctx context.Context, opts ...WriteOption) error {
 
 	l.entry.version = version
 	l.original = append(l.original[:0], raw...)
+	l.manager.logger.Debug("committed write", "component", "entry", "name", l.entry.name, "version", version)
 	l.manager.broadcast(ctx, Message{
 		Type:    MessageUpdate,
 		Name:    l.entry.name,

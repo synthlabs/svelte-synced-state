@@ -156,6 +156,18 @@ export class SyncedClient {
     async set(name, value, version) {
         return this.send({ type: 'set', id: this.#id(), name, value, version });
     }
+    log(payload) {
+        if (this.#socket && this.#socket.readyState === this.#WebSocketCtor.OPEN) {
+            this.#sendRaw({ type: 'log', value: payload });
+            return;
+        }
+        try {
+            void this.connect().catch(() => { });
+        }
+        catch {
+            // Logs are best-effort and should never break application flow.
+        }
+    }
     async send(message) {
         await this.connect();
         if (!this.#socket || this.#socket.readyState !== this.#WebSocketCtor.OPEN) {
@@ -225,3 +237,5 @@ function resolveURL(url) {
     const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${protocol}//${globalThis.location.host}/synced-state`;
 }
+export { createLogger } from './log.js';
+export { LogLevel } from './protocol.js';

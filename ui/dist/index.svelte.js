@@ -203,5 +203,5 @@ function syncResult(ok, version, error) {
     }
     return result;
 }
-export { getDefaultClient, resetDefaultClient, SyncedClient } from './client.js';
+export { createLogger, getDefaultClient, LogLevel, resetDefaultClient, SyncedClient } from './client.js';
 export { indexedAddress, indexedWildcard, singletonAddress } from './address.js';

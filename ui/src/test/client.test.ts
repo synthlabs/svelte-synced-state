@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SyncedClient, getDefaultClient, resetDefaultClient } from '../lib/client.js';
+import { LogLevel, SyncedClient, getDefaultClient, resetDefaultClient } from '../lib/client.js';
 import type { StateMessage } from '../lib/protocol.js';
 import { FakeWebSocket, flushMicrotasks } from './fake-websocket.js';
 
@@ -153,6 +153,72 @@ describe('SyncedClient', () => {
 			type: 'snapshot',
 			name: 'TestState'
 		});
+	});
+
+	it('sends log messages only when the socket is open', async () => {
+		const client = createClient();
+		const pending = client.connect();
+		const socket = FakeWebSocket.latest();
+		socket.open();
+		await pending;
+
+		client.log({
+			level: LogLevel.Info,
+			message: 'hello',
+			timestamp: '2026-06-19T10:00:00.000Z',
+			scope: 'ui'
+		});
+
+		expect(socket.sentMessages().at(-1)).toMatchObject({
+			type: 'log',
+			value: {
+				level: LogLevel.Info,
+				message: 'hello',
+				timestamp: '2026-06-19T10:00:00.000Z',
+				scope: 'ui'
+			}
+		});
+	});
+
+	it('drops the current log while opening a closed socket', async () => {
+		const client = createClient();
+
+		client.log({
+			level: LogLevel.Warn,
+			message: 'dropped',
+			timestamp: '2026-06-19T10:00:00.000Z',
+			scope: 'ui'
+		});
+
+		const socket = FakeWebSocket.latest();
+		expect(socket.readyState).toBe(FakeWebSocket.CONNECTING);
+		expect(socket.sent).toHaveLength(0);
+
+		socket.fail();
+		await flushMicrotasks();
+	});
+
+	it('does not throw when a log-triggered connection cannot be constructed', () => {
+		class ThrowingWebSocket {
+			static OPEN = 1;
+
+			constructor() {
+				throw new Error('boom');
+			}
+		}
+		const client = new SyncedClient({
+			url: defaultURL,
+			WebSocketCtor: ThrowingWebSocket as unknown as typeof WebSocket
+		});
+
+		expect(() =>
+			client.log({
+				level: LogLevel.Error,
+				message: 'ignored',
+				timestamp: '2026-06-19T10:00:00.000Z',
+				scope: 'ui'
+			})
+		).not.toThrow();
 	});
 
 	it('delivers messages to every local handler and unsubscribes only after the last one is removed', async () => {

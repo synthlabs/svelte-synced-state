@@ -1,4 +1,4 @@
-import type { StateMessage } from './protocol.js';
+import type { LogPayload, StateMessage } from './protocol.js';
 import { wildcardForAddress } from './address.js';
 
 type WebSocketLike = typeof WebSocket;
@@ -191,6 +191,18 @@ export class SyncedClient {
 		return this.send({ type: 'set', id: this.#id(), name, value, version });
 	}
 
+	log(payload: LogPayload): void {
+		if (this.#socket && this.#socket.readyState === this.#WebSocketCtor.OPEN) {
+			this.#sendRaw({ type: 'log', value: payload });
+			return;
+		}
+		try {
+			void this.connect().catch(() => {});
+		} catch {
+			// Logs are best-effort and should never break application flow.
+		}
+	}
+
 	async send(message: StateMessage): Promise<boolean> {
 		await this.connect();
 		if (!this.#socket || this.#socket.readyState !== this.#WebSocketCtor.OPEN) {
@@ -273,3 +285,8 @@ function resolveURL(url: string | URL | undefined): string {
 	const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:';
 	return `${protocol}//${globalThis.location.host}/synced-state`;
 }
+
+export { createLogger } from './log.js';
+export type { Logger, LoggerOptions } from './log.js';
+export { LogLevel } from './protocol.js';
+export type { LogPayload } from './protocol.js';

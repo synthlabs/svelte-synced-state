@@ -245,7 +245,7 @@ function syncResult(ok: boolean, version?: number, error?: string): SyncResult {
 	return result;
 }
 
-export { getDefaultClient, resetDefaultClient, SyncedClient } from './client.js';
-export type { ConnectionStatus } from './client.js';
+export { createLogger, getDefaultClient, LogLevel, resetDefaultClient, SyncedClient } from './client.js';
+export type { ConnectionStatus, Logger, LoggerOptions, LogPayload } from './client.js';
 export { indexedAddress, indexedWildcard, singletonAddress } from './address.js';
 export type { MessageType, StateMessage, SyncResult } from './protocol.js';

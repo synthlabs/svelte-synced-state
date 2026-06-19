@@ -42,6 +42,22 @@ func WithOriginPatterns(patterns ...string) HandlerOption {
 	}
 }
 
+func WithLogger(logger Logger) Option {
+	return func(manager *Manager) {
+		if logger != nil {
+			manager.logger = logger
+		}
+	}
+}
+
+func WithLogLevel(level LogLevel) Option {
+	return func(manager *Manager) {
+		if validLogLevel(level) {
+			manager.logLevel = level
+		}
+	}
+}
+
 func WithSendBuffer(size int) HandlerOption {
 	return func(cfg *handlerConfig) {
 		if size > 0 {

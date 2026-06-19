@@ -10,6 +10,7 @@ const (
 	MessageSet         MessageType = "set"
 	MessageSnapshot    MessageType = "snapshot"
 	MessageUpdate      MessageType = "update"
+	MessageLog         MessageType = "log"
 	MessageError       MessageType = "error"
 )
 

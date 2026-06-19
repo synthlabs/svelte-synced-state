@@ -2,6 +2,7 @@ package syncedstate
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -12,16 +13,23 @@ type Manager struct {
 	storage     storage
 	subscribers map[string]map[*client]struct{}
 	nextClient  atomic.Uint64
+	logger      Logger
+	logLevel    LogLevel
 }
 
 func NewManager(opts ...Option) *Manager {
 	m := &Manager{
 		storage:     newMemoryStorage(),
 		subscribers: make(map[string]map[*client]struct{}),
+		logLevel:    LevelInfo,
 	}
 
 	for _, opt := range opts {
 		opt(m)
+	}
+
+	if m.logger == nil {
+		m.logger = defaultLogger(m.logLevel)
 	}
 
 	return m
@@ -35,6 +43,9 @@ func Define[T any](manager *Manager, name string, initial T, opts ...KeyOption) 
 
 	e := newEntry(name, initial)
 	if err := manager.storage.define(name, e); err != nil {
+		if errors.Is(err, ErrAlreadyDefined) {
+			manager.logger.Warn("state already defined", "component", "storage", "name", name)
+		}
 		return nil, err
 	}
 
@@ -44,6 +55,9 @@ func Define[T any](manager *Manager, name string, initial T, opts ...KeyOption) 
 func Lookup[T any](manager *Manager, name string) (*Key[T], error) {
 	e, err := manager.storage.lookup(name)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			manager.logger.Debug("lookup miss", "component", "storage", "name", name)
+		}
 		return nil, err
 	}
 
@@ -68,20 +82,21 @@ func (m *Manager) subscribe(c *client, name string) error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if _, ok := m.subscribers[name]; !ok {
 		m.subscribers[name] = make(map[*client]struct{})
 	}
 	m.subscribers[name][c] = struct{}{}
 	c.subscriptions[name] = struct{}{}
+	subscriberCount := len(m.subscribers[name])
+	subscriptionCount := len(c.subscriptions)
+	m.mu.Unlock()
+
+	m.logger.Debug("subscribe", "component", "manager", "client", c.id, "name", name, "subscribers", subscriberCount, "subscriptions", subscriptionCount)
 	return nil
 }
 
 func (m *Manager) unsubscribe(c *client, name string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if subscribers, ok := m.subscribers[name]; ok {
 		delete(subscribers, c)
 		if len(subscribers) == 0 {
@@ -89,12 +104,16 @@ func (m *Manager) unsubscribe(c *client, name string) {
 		}
 	}
 	delete(c.subscriptions, name)
+	remaining := len(c.subscriptions)
+	m.mu.Unlock()
+
+	m.logger.Debug("unsubscribe", "component", "manager", "client", c.id, "name", name, "subscriptions", remaining)
 }
 
 func (m *Manager) removeClient(c *client) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
+	removed := len(c.subscriptions)
 	for name := range c.subscriptions {
 		if subscribers, ok := m.subscribers[name]; ok {
 			delete(subscribers, c)
@@ -103,6 +122,9 @@ func (m *Manager) removeClient(c *client) {
 			}
 		}
 	}
+	m.mu.Unlock()
+
+	m.logger.Debug("remove client", "component", "manager", "client", c.id, "subscriptions", removed)
 }
 
 func (m *Manager) broadcast(ctx context.Context, msg Message) {
@@ -135,6 +157,7 @@ func (m *Manager) broadcast(ctx context.Context, msg Message) {
 	}
 	m.mu.RUnlock()
 
+	m.logger.Debug("broadcast", "component", "manager", "name", msg.Name, "recipients", len(clients))
 	for _, c := range clients {
 		if !c.enqueue(ctx, msg) {
 			return

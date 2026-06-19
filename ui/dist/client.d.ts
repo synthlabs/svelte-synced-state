@@ -1,4 +1,4 @@
-import type { StateMessage } from './protocol.js';
+import type { LogPayload, StateMessage } from './protocol.js';
 type WebSocketLike = typeof WebSocket;
 export interface SyncedClientOptions {
     url?: string | URL;
@@ -20,9 +20,13 @@ export declare class SyncedClient {
     subscribe<T>(name: string, handler: StateMessageHandler<T>): () => void;
     snapshot(name: string): Promise<boolean>;
     set<T>(name: string, value: T, version?: number): Promise<boolean>;
+    log(payload: LogPayload): void;
     send(message: StateMessage): Promise<boolean>;
     close(code?: number, reason?: string): void;
 }
 export declare function getDefaultClient(options?: SyncedClientOptions): SyncedClient;
 export declare function resetDefaultClient(): void;
-export {};
+export { createLogger } from './log.js';
+export type { Logger, LoggerOptions } from './log.js';
+export { LogLevel } from './protocol.js';
+export type { LogPayload } from './protocol.js';

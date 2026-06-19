@@ -62,6 +62,23 @@ http.Handle("/synced-state", manager.Handler(
 ))
 ```
 
+Backend and forwarded frontend logs use a shared logger. By default, the manager
+writes text logs to stdout at `Info` and above. Use `WithLogLevel` to raise or
+lower the default logger's threshold, or pass any `*slog.Logger` with
+`WithLogger`:
+
+```go
+manager := syncedstate.NewManager(
+	syncedstate.WithLogLevel(syncedstate.LevelDebug),
+)
+```
+
+```go
+manager := syncedstate.NewManager(
+	syncedstate.WithLogger(slog.New(slog.NewJSONHandler(os.Stdout, nil))),
+)
+```
+
 For longer critical sections, use the lower-level lock handle:
 
 ```go
@@ -112,6 +129,21 @@ return locked.Sync(context.Background())
 </form>
 ```
 
+Frontend logs can be printed locally and forwarded to the backend over the same
+WebSocket:
+
+```svelte
+<script lang="ts">
+	import { createLogger } from 'svelte-synced-state';
+
+	const logger = createLogger({ scope: 'login' });
+	logger.info('login form mounted');
+
+	// Optional: forward existing console.* calls too.
+	const restoreConsole = logger.forwardConsole();
+</script>
+```
+
 ## Protocol
 
 The WebSocket transport uses JSON envelopes:
@@ -128,7 +160,11 @@ The WebSocket transport uses JSON envelopes:
 { "type": "set", "id": "2", "name": "InternalState", "version": 3, "value": { "authenticated": false, "name": "" } }
 ```
 
-Supported message types are `subscribe`, `unsubscribe`, `snapshot`, `set`, `update`, and `error`. Snapshots and updates carry the current server-assigned version. Frontend `set` messages carry the next expected version, and stale writes receive a `snapshot` with the latest value/version plus an `error` string. V1 syncs full JSON values, not partial patches.
+```json
+{ "type": "log", "value": { "level": 3, "message": "hello", "timestamp": "2026-06-19T10:00:00.000Z", "scope": "ui" } }
+```
+
+Supported message types are `subscribe`, `unsubscribe`, `snapshot`, `set`, `update`, `log`, and `error`. Snapshots and updates carry the current server-assigned version. Frontend `set` messages carry the next expected version, and stale writes receive a `snapshot` with the latest value/version plus an `error` string. `log` messages are client-to-backend fire-and-forget events; they are not broadcast and do not receive acknowledgements. V1 syncs full JSON values, not partial patches.
 
 ## Development
 
