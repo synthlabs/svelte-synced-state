@@ -153,11 +153,11 @@ func TestClientEnqueueClosesWhenSendBufferFull(t *testing.T) {
 	serverConn, _ := dialAcceptedConn(t)
 	c := &client{
 		conn: serverConn,
-		send: make(chan Message, 1),
+		send: make(chan outbound, 1),
 		done: make(chan struct{}),
 	}
 
-	c.send <- Message{Type: MessageUpdate, ID: "first"}
+	c.send <- outbound{msg: Message{Type: MessageUpdate, ID: "first"}}
 	if ok := c.enqueue(context.Background(), Message{Type: MessageUpdate, ID: "second"}); !ok {
 		t.Fatal("enqueue returned false before context cancellation")
 	}
@@ -173,12 +173,12 @@ func TestClientEnqueueBlocksWhenSendBufferFull(t *testing.T) {
 	serverConn, _ := dialAcceptedConn(t)
 	c := &client{
 		conn:              serverConn,
-		send:              make(chan Message, 1),
+		send:              make(chan outbound, 1),
 		blockOnFullBuffer: true,
 		done:              make(chan struct{}),
 	}
 
-	c.send <- Message{Type: MessageUpdate, ID: "first"}
+	c.send <- outbound{msg: Message{Type: MessageUpdate, ID: "first"}}
 	enqueued := make(chan bool, 1)
 	go func() {
 		enqueued <- c.enqueue(context.Background(), Message{Type: MessageUpdate, ID: "second"})
@@ -190,8 +190,8 @@ func TestClientEnqueueBlocksWhenSendBufferFull(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	if msg := <-c.send; msg.ID != "first" {
-		t.Fatalf("first queued message = %+v", msg)
+	if item := <-c.send; item.msg.ID != "first" {
+		t.Fatalf("first queued message = %+v", item.msg)
 	}
 
 	select {
@@ -203,21 +203,21 @@ func TestClientEnqueueBlocksWhenSendBufferFull(t *testing.T) {
 		t.Fatal("enqueue did not complete after send buffer space was available")
 	}
 
-	if msg := <-c.send; msg.ID != "second" {
-		t.Fatalf("second queued message = %+v", msg)
+	if item := <-c.send; item.msg.ID != "second" {
+		t.Fatalf("second queued message = %+v", item.msg)
 	}
 }
 
 func TestClientEnqueueStopsBlockingWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &client{
-		send:              make(chan Message, 1),
+		send:              make(chan outbound, 1),
 		blockOnFullBuffer: true,
 		done:              make(chan struct{}),
 	}
 	defer close(c.done)
 
-	c.send <- Message{Type: MessageUpdate, ID: "first"}
+	c.send <- outbound{msg: Message{Type: MessageUpdate, ID: "first"}}
 	enqueued := make(chan bool, 1)
 	go func() {
 		enqueued <- c.enqueue(ctx, Message{Type: MessageUpdate, ID: "second"})

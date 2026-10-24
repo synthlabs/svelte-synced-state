@@ -22,17 +22,20 @@ type writeConfig struct {
 type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
-	acceptOptions     websocket.AcceptOptions
-	sendBuffer        int
-	blockOnFullBuffer bool
-	writeTimeout      time.Duration
-	pingInterval      time.Duration
+	acceptOptions      websocket.AcceptOptions
+	sendBuffer         int
+	blockOnFullBuffer  bool
+	writeTimeout       time.Duration
+	pingInterval       time.Duration
+	statsInterval      time.Duration
+	slowWriteThreshold time.Duration
 }
 
 func defaultHandlerConfig() handlerConfig {
 	return handlerConfig{
-		sendBuffer:   32,
-		writeTimeout: 10 * time.Second,
+		sendBuffer:         32,
+		writeTimeout:       10 * time.Second,
+		slowWriteThreshold: 250 * time.Millisecond,
 	}
 }
 
@@ -88,6 +91,28 @@ func WithPingInterval(interval time.Duration) HandlerOption {
 	return func(cfg *handlerConfig) {
 		if interval > 0 {
 			cfg.pingInterval = interval
+		}
+	}
+}
+
+// WithStatsInterval logs a "client stats" record per connection on this
+// interval: messages and bytes written, send-queue depth and high-water mark,
+// the longest queue wait and write, and slow-write counts. Zero (the default)
+// disables the report.
+func WithStatsInterval(interval time.Duration) HandlerOption {
+	return func(cfg *handlerConfig) {
+		if interval > 0 {
+			cfg.statsInterval = interval
+		}
+	}
+}
+
+// WithSlowWriteThreshold sets the write duration above which a frame counts as
+// a slow write in client stats. The default is 250ms.
+func WithSlowWriteThreshold(threshold time.Duration) HandlerOption {
+	return func(cfg *handlerConfig) {
+		if threshold > 0 {
+			cfg.slowWriteThreshold = threshold
 		}
 	}
 }

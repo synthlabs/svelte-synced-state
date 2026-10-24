@@ -13,6 +13,7 @@ type Manager struct {
 	storage     storage
 	subscribers map[string]map[*client]struct{}
 	nextClient  atomic.Uint64
+	bufferFull  atomic.Uint64
 	logger      Logger
 	logLevel    LogLevel
 }
