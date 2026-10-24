@@ -15,7 +15,8 @@ type client struct {
 	id                uint64
 	manager           *Manager
 	conn              *websocket.Conn
-	send              chan Message
+	send              chan outbound
+	stats             clientStats
 	blockOnFullBuffer bool
 	subscriptions     map[string]struct{}
 	done              chan struct{}
@@ -38,7 +39,7 @@ func (m *Manager) Handler(opts ...HandlerOption) http.Handler {
 			id:                m.nextClient.Add(1),
 			manager:           m,
 			conn:              conn,
-			send:              make(chan Message, cfg.sendBuffer),
+			send:              make(chan outbound, cfg.sendBuffer),
 			blockOnFullBuffer: cfg.blockOnFullBuffer,
 			subscriptions:     make(map[string]struct{}),
 			done:              make(chan struct{}),
@@ -195,6 +196,12 @@ func (c *client) writeLoop(ctx context.Context, cfg handlerConfig) {
 		defer ticker.Stop()
 		pings = ticker.C
 	}
+	var statsTicks <-chan time.Time
+	if cfg.statsInterval > 0 {
+		ticker := time.NewTicker(cfg.statsInterval)
+		defer ticker.Stop()
+		statsTicks = ticker.C
+	}
 
 	for {
 		select {
@@ -202,18 +209,23 @@ func (c *client) writeLoop(ctx context.Context, cfg handlerConfig) {
 			return
 		case <-c.done:
 			return
-		case msg := <-c.send:
-			data, err := json.Marshal(msg)
+		case item := <-c.send:
+			queueWait := time.Since(item.enqueuedAt)
+			data, err := json.Marshal(item.msg)
 			if err != nil {
 				continue
 			}
 
 			writeCtx, cancel := context.WithTimeout(ctx, cfg.writeTimeout)
+			started := time.Now()
 			err = c.conn.Write(writeCtx, websocket.MessageText, data)
 			cancel()
 			if err != nil {
 				return
 			}
+			c.stats.recordWrite(len(data), queueWait, time.Since(started), cfg.slowWriteThreshold)
+		case <-statsTicks:
+			c.logStats()
 		case <-pings:
 			// A missed pong makes Ping return within this deadline; closing here
 			// surfaces the dead link so the client can reconnect.
@@ -239,9 +251,11 @@ func (c *client) enqueue(ctx context.Context, msg Message) bool {
 	default:
 	}
 
+	item := outbound{msg: msg, enqueuedAt: time.Now()}
 	if c.blockOnFullBuffer {
 		select {
-		case c.send <- msg:
+		case c.send <- item:
+			c.stats.recordEnqueue(len(c.send))
 		case <-c.done:
 		case <-ctx.Done():
 			return false
@@ -250,11 +264,15 @@ func (c *client) enqueue(ctx context.Context, msg Message) bool {
 	}
 
 	select {
-	case c.send <- msg:
+	case c.send <- item:
+		c.stats.recordEnqueue(len(c.send))
 	case <-c.done:
 	default:
-		if c.manager != nil && c.manager.logger != nil {
-			c.manager.logger.Warn("send buffer full", "component", "handler", "client", c.id)
+		if c.manager != nil {
+			c.manager.bufferFull.Add(1)
+			if c.manager.logger != nil {
+				c.manager.logger.Warn("send buffer full", "component", "handler", "client", c.id)
+			}
 		}
 		c.close(websocket.StatusPolicyViolation, "send buffer full")
 	}
